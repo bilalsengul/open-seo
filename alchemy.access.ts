@@ -64,6 +64,7 @@ export const emailAccessGate = (options: {
   policyName: string;
   applicationName: string;
   domain: string;
+  extraDomains?: string[];
   emails: string[];
 }) =>
   Effect.gen(function* () {
@@ -76,6 +77,14 @@ export const emailAccessGate = (options: {
       type: "self_hosted",
       name: options.applicationName,
       domain: options.domain,
+      // Custom domains (e.g. a vanity hostname on an owned zone) must sit
+      // behind the same gate as the workers.dev hostname.
+      destinations: options.extraDomains?.length
+        ? [options.domain, ...options.extraDomains].map((uri) => ({
+            type: "public" as const,
+            uri,
+          }))
+        : undefined,
       policies: [allow.policyId],
     });
   });
