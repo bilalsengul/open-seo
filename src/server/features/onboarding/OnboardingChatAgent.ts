@@ -1,11 +1,7 @@
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import {
-  convertToModelMessages,
-  stepCountIs,
-  streamText,
-  type StreamTextOnFinishCallback,
-  type ToolSet,
-} from "ai";
+import * as ai from "ai";
+import type { StreamTextOnFinishCallback, ToolSet } from "ai";
+import { wrapAISDK } from "agents/observability/ai";
 import type { OnChatMessageOptions } from "@cloudflare/ai-chat";
 import { ProjectRepository } from "@/server/features/projects/repositories/ProjectRepository";
 import { buildOnboardingTools } from "@/server/features/onboarding/onboardingChatTools";
@@ -22,6 +18,12 @@ import {
 } from "@/server/billing/subscription";
 import { FREE_ONBOARDING_QUESTION_LIMIT } from "@/shared/onboardingChat";
 import openSeoFactSheet from "@/server/features/onboarding/openseo-fact-sheet.md?raw";
+
+// Agent tracing (Workers observability.traces). Wrapped once per module so
+// the direct AI SDK call below is instrumented exactly once; metadata only —
+// no messages or tool payloads are stored (storeMessages/storeTools default
+// to false).
+const tracedAI = wrapAISDK(ai);
 
 function buildSystemPrompt(domain: string | null): string {
   return [
@@ -164,10 +166,21 @@ export class OnboardingChatAgent extends AIChatAgent {
 
     const model = await getChatAgentModel();
 
-    const result = streamText({
+    const result = tracedAI.streamText({
       model,
       system: buildSystemPrompt(project.domain),
-      messages: await convertToModelMessages(this.messages),
+      messages: await ai.convertToModelMessages(this.messages),
+      // Trace identity (AI SDK v6): shared agent name, stable agent id (the
+      // DO instance id), and the conversation id (this DO's name, i.e. the
+      // project id — one onboarding conversation per project). No user input
+      // or personal data goes into tracing context.
+      experimental_telemetry: {
+        functionId: "onboarding-chat",
+        metadata: {
+          agentId: this.ctx.id.toString(),
+          conversationId: this.name,
+        },
+      },
       // Cancel the (billable) LLM call if the user aborts/navigates away.
       abortSignal: options?.abortSignal,
       // Budget shared by reasoning + visible output. Reasoning tokens (enabled
@@ -177,7 +190,7 @@ export class OnboardingChatAgent extends AIChatAgent {
       // Deliberately roomy: it's a per-step ceiling, not a target — the model
       // only generates (and we only bill) what it actually uses.
       maxOutputTokens: 32_000,
-      stopWhen: stepCountIs(5),
+      stopWhen: ai.stepCountIs(5),
       // Meter LLM spend against the same credit pool as DataForSEO: sum the real
       // per-step cost OpenRouter reports and deduct it. Best-effort, hosted-only.
       onFinish: async (event) => {
